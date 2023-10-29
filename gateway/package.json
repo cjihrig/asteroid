@@ -1,0 +1,21 @@
+{
+  "name": "gateway",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "Colin J. Ihrig <cjihrig@gmail.com> (http://www.cjihrig.com/)",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.456.0",
+    "@aws-sdk/s3-request-presigner": "^3.456.0",
+    "@hapi/h2o2": "^10.0.4",
+    "@hapi/hapi": "^21.3.2",
+    "@kubernetes/client-node": "^0.20.0",
+    "pg": "^8.11.3"
+  }
+}
