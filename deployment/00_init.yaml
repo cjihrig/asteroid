@@ -1,0 +1,90 @@
+# Deploy these first: namespaces, roles, network policies.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: asteroid
+  labels:
+    name: asteroid
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps
+  labels:
+    name: apps
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manage-app-pods
+  namespace: apps
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["create", "get", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: manage-app-pods
+  namespace: apps
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: default # TODO(cjihrig): Use asteroid namespace.
+roleRef:
+  kind: Role
+  name: manage-app-pods
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: internet-and-dns-only-egress
+  namespace: apps
+spec:
+  policyTypes:
+    - Egress
+  podSelector: {}
+  egress:
+    - to:
+        - ipBlock:
+            # allow all IPs
+            cidr: 0.0.0.0/0
+            except:
+              # https://en.wikipedia.org/wiki/Private_network
+              - 10.0.0.0/8
+              - 192.168.0.0/16
+              - 172.16.0.0/20
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # TODO(cjihrig): This rule is specific to minikube.
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            # kubernetes.io/metadata.name: asteroid
+            kubernetes.io/metadata.name: default
+        podSelector:
+          matchLabels:
+            app: asteroid-minio
+      ports:
+        - port: 9000
+          protocol: TCP
+---

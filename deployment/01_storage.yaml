@@ -1,0 +1,100 @@
+# Deploy postgresql and minio for storage.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: asteroid-postgres-config
+  labels:
+    app: asteroid-postgres
+data:
+  POSTGRES_DB: asteroid
+  POSTGRES_USER: admin
+  POSTGRES_PASSWORD: admin
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: asteroid-postgres
+  # namespace: asteroid
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: asteroid-postgres
+  template:
+    metadata:
+      labels:
+        app: asteroid-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:10.1
+          imagePullPolicy: "IfNotPresent"
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - configMapRef:
+                name: asteroid-postgres-config
+          # volumeMounts:
+          #   - mountPath: /var/lib/postgresql/data
+          #     name: postgredb
+      # volumes:
+      #   - name: postgredb
+      #     persistentVolumeClaim:
+      #       claimName: postgres-pv-claim
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: asteroid-postgres-service
+  labels:
+    app: asteroid-postgres
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+  selector:
+    app: asteroid-postgres
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: asteroid-minio
+  name: asteroid-minio
+  # namespace: asteroid
+spec:
+  containers:
+  - name: minio
+    image: quay.io/minio/minio:latest
+    imagePullPolicy: "IfNotPresent"
+    command:
+    - /bin/bash
+    - -c
+    args:
+    - minio server /data --console-address :9090
+    # volumeMounts:
+    # - mountPath: /data
+    #   name: localvolume # Corresponds to the `spec.volumes` Persistent Volume
+  # nodeSelector:
+  #   kubernetes.io/hostname: kubealpha.local # Specify a node label associated to the Worker Node on which you want to deploy the pod.
+  # volumes:
+  # - name: localvolume
+  #   hostPath: # MinIO generally recommends using locally-attached volumes
+  #     path: /mnt/disk1/data # Specify a path to a local drive or volume on the Kubernetes worker node
+  #     type: DirectoryOrCreate # The path to the last directory must exist
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: asteroid-minio-service
+  # namespace: asteroid
+spec:
+  selector:
+    app: asteroid-minio
+  type: LoadBalancer
+  ports:
+    - protocol: TCP
+      port: 9000
+      targetPort: 9000
+---
