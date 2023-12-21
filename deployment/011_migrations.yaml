@@ -17,4 +17,5 @@ spec:
     env:
     - name: DATABASE_URL
       value: "postgres://admin:admin@asteroid-postgres-service.default.svc.cluster.local:5432/asteroid"
+  restartPolicy: 'Never'
 ---

@@ -10,7 +10,15 @@ const {
   S3Client,
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const pg = require('pg');
 const tar = require('tar');
+const pgClient = new pg.Client({
+  host: 'asteroid-postgres-service.default.svc.cluster.local',
+  port: 5432,
+  database: 'asteroid',
+  user: 'admin',
+  password: 'admin',
+});
 const s3 = new S3Client({
   credentials: {
     accessKeyId: 'minioadmin',
@@ -22,7 +30,7 @@ const s3 = new S3Client({
 });
 
 const bucketName = 'asteroid-deployments';
-const objectKey = 'test-entry.tar.gz';
+let objectKey;
 
 (async () => {
   try {
@@ -44,6 +52,21 @@ const objectKey = 'test-entry.tar.gz';
       if (err.Code !== 'BucketAlreadyOwnedByYou') {
         console.log(err);
       }
+    }
+
+    try {
+      await pgClient.connect();
+      const sql = 'INSERT INTO deployments (host, bucket_name, entry_file, handler) VALUES ($1, $2, $3, $4) RETURNING *';
+      const values = ['foobar.com', bucketName, 'source.js', 'handler'];
+      const result = await pgClient.query(sql, values);
+
+      console.log('CREATED RECORD IN DATABASE');
+      console.log(result.rows[0]);
+      objectKey = result.rows[0].id;
+    } catch (err) {
+      console.log('failed to create deployment in database');
+      console.log(err);
+      process.exit(1);
     }
 
     try {

@@ -1,5 +1,4 @@
 'use strict';
-const { randomUUID } = require('node:crypto');
 const { EventEmitter, once } = require('node:events');
 const { GetObjectCommand, S3Client } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
@@ -56,24 +55,32 @@ const pgClient = new pg.Client({
 watcher.watch(kPodWatchPath, kPodWatchOptions, podWatchHandler, podWatchExit);
 
 async function lookupHostConfig(host) {
-  // TODO(cjihrig): Look this up from a database.
-  if (host === 'foobar.com' || host === 'barbaz.com') {
-    const getCmd = new GetObjectCommand({
-      Bucket: 'asteroid-deployments',
-      Key: 'test-entry.tar.gz',
-    });
-    const url = await getSignedUrl(s3, getCmd, { expiresIn: 60 * 3 });
+  const sql = 'SELECT id, bucket_name, entry_file, handler FROM deployments WHERE host = $1';
+  const result = await pgClient.query(sql, [host]);
 
-    return {
-      deployment: `d-${randomUUID()}`,
-      entry: 'source.js',
-      export: 'handler',
-      host,
-      url,
-    };
+  if (result.rowCount !== 1) {
+    return null;
   }
 
-  return null;
+  const {
+    id: deployment,
+    bucket_name: bucketName,
+    entry_file: entry,
+    handler,
+  } = result.rows[0];
+  const getCmd = new GetObjectCommand({
+    Bucket: bucketName,
+    Key: deployment,
+  });
+  const url = await getSignedUrl(s3, getCmd, { expiresIn: 60 * 3 });
+
+  return {
+    deployment,
+    entry,
+    handler,
+    host,
+    url,
+  };
 }
 
 async function createFunctionPod(config) {
@@ -103,7 +110,7 @@ async function createFunctionPod(config) {
               },
               {
                 name: 'ASTEROID_DEPLOYMENT_PACKAGE_EXPORT',
-                value: config.export,
+                value: config.handler,
               },
             ],
             securityContext: {
@@ -170,7 +177,7 @@ async function main() {
         const config = await lookupHostConfig(host);
 
         if (config === null) {
-          return h.code(404);
+          return h.response().code(404);
         }
 
         let deployment = activeDeployments.get(host);
@@ -193,6 +200,7 @@ async function main() {
     },
   });
 
+  await pgClient.connect();
   await server.start();
 }
 
