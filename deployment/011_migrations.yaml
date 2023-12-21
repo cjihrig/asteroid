@@ -1,0 +1,20 @@
+# Database migrations.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: asteroid-postgres-migrations
+  name: asteroid-postgres-migrations
+  # namespace: asteroid
+spec:
+  containers:
+  - name: asteroid-postgres-migrations
+    image: asteroid-migrations
+    # TODO(cjihrig): Change this when not using minikube.
+    imagePullPolicy: IfNotPresent
+    # TODO(cjihrig): Get this from secret.
+    env:
+    - name: DATABASE_URL
+      value: "postgres://admin:admin@asteroid-postgres-service.default.svc.cluster.local:5432/asteroid"
+---

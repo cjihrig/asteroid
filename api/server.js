@@ -21,7 +21,7 @@ const s3 = new S3Client({
   forcePathStyle: true,
 });
 
-const bucketName = 'test-bucket';
+const bucketName = 'asteroid-deployments';
 const objectKey = 'test-entry.tar.gz';
 
 (async () => {

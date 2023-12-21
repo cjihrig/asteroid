@@ -59,7 +59,7 @@ async function lookupHostConfig(host) {
   // TODO(cjihrig): Look this up from a database.
   if (host === 'foobar.com' || host === 'barbaz.com') {
     const getCmd = new GetObjectCommand({
-      Bucket: 'test-bucket',
+      Bucket: 'asteroid-deployments',
       Key: 'test-entry.tar.gz',
     });
     const url = await getSignedUrl(s3, getCmd, { expiresIn: 60 * 3 });
