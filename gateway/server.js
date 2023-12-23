@@ -54,6 +54,20 @@ const pgClient = new pg.Client({
 // watch() returns an object with an 'abort()' method.
 watcher.watch(kPodWatchPath, kPodWatchOptions, podWatchHandler, podWatchExit);
 
+// TODO(cjihrig): Move the reaper to its own process.
+async function reaper() {
+  for (const deployment of activeDeployments.values()) {
+    deployment.generation++;
+
+    if (deployment.generation > 1) {
+      await client.deleteNamespacedPod(deployment.deployment, kAppNamespace);
+      activeDeployments.delete(deployment.host);
+    }
+  }
+}
+
+setInterval(reaper, 60 * 1000);
+
 async function lookupHostConfig(host) {
   const sql = 'SELECT id, bucket_name, entry_file, handler FROM deployments WHERE host = $1';
   const result = await pgClient.query(sql, [host]);
@@ -77,8 +91,10 @@ async function lookupHostConfig(host) {
   return {
     deployment,
     entry,
+    generation: 0,
     handler,
     host,
+    pod: null,
     url,
   };
 }
@@ -186,13 +202,16 @@ async function main() {
           const startTime = process.hrtime.bigint();
           const pod = await createFunctionPod(config);
           const endTime = process.hrtime.bigint();
-          console.log(pod);
+          // console.log(pod);
           console.log(`pod ready in ${endTime - startTime} nanoseconds`);
-          deployment = pod.status.podIP;
-          activeDeployments.set(host, deployment);
+          config.pod = pod;
+          activeDeployments.set(host, config);
+          deployment = config;
         }
+
+        deployment.generation = 0;
         return h.proxy({
-          host: deployment,
+          host: deployment.pod.status.podIP,
           port: kDataPort,
           protocol: 'http',
         });
