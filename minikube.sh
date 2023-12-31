@@ -5,6 +5,7 @@ eval $(minikube -p minikube docker-env)
 docker build ./api -t asteroid-api
 docker build ./gateway -t asteroid-gateway
 docker build ./migrations -t asteroid-migrations
+docker build ./reaper -t asteroid-reaper
 docker build ./runner -t asteroid-runner
 
 kubectl apply -f ./deployment/000_init.yaml

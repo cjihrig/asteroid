@@ -44,6 +44,30 @@ roleRef:
   name: manage-app-pods
   apiGroup: rbac.authorization.k8s.io
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: asteroid-control-plane
+  namespace: default # TODO(cjihrig): Use asteroid namespace.
+rules:
+- apiGroups: [""]
+  resources: ["endpoints"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: asteroid-control-plane
+  namespace: default # TODO(cjihrig): Use asteroid namespace.
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: default # TODO(cjihrig): Use asteroid namespace.
+roleRef:
+  kind: Role
+  name: asteroid-control-plane
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

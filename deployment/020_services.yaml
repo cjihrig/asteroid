@@ -80,3 +80,17 @@ spec:
         ports:
         - containerPort: 8000
 ---
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: asteroid-reaper
+  name: asteroid-reaper
+  # namespace: asteroid
+spec:
+  containers:
+  - name: reaper
+    image: asteroid-reaper
+    # TODO(cjihrig): Change this when not using minikube.
+    imagePullPolicy: "IfNotPresent"
+---

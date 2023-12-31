@@ -16,6 +16,7 @@ const kDataPort = 8000;
 
 // TODO(cjihrig): Move this tracking to database.
 const activeDeployments = new Map();
+const accessedDeployments = new Map();
 
 const s3 = new S3Client({
   credentials: {
@@ -54,20 +55,6 @@ const pgClient = new pg.Client({
 // watch() returns an object with an 'abort()' method.
 watcher.watch(kPodWatchPath, kPodWatchOptions, podWatchHandler, podWatchExit);
 
-// TODO(cjihrig): Move the reaper to its own process.
-async function reaper() {
-  for (const deployment of activeDeployments.values()) {
-    deployment.generation++;
-
-    if (deployment.generation > 1) {
-      await client.deleteNamespacedPod(deployment.deployment, kAppNamespace);
-      activeDeployments.delete(deployment.host);
-    }
-  }
-}
-
-setInterval(reaper, 60 * 1000);
-
 async function lookupHostConfig(host) {
   const sql = 'SELECT id, bucket_name, entry_file, handler FROM deployments WHERE host = $1';
   const result = await pgClient.query(sql, [host]);
@@ -91,7 +78,6 @@ async function lookupHostConfig(host) {
   return {
     deployment,
     entry,
-    generation: 0,
     handler,
     host,
     pod: null,
@@ -103,6 +89,7 @@ async function createFunctionPod(config) {
   try {
     const podDefinition = {
       metadata: {
+        // TODO(cjihrig): Need some random string in the name.
         name: config.deployment,
         namespace: kAppNamespace,
       },
@@ -180,6 +167,37 @@ async function main() {
 
   await server.register(h2o2);
 
+  // TODO(cjihrig): This route needs to be on a non-exposed port.
+  server.route({
+    method: 'GET',
+    path: '/deployments',
+    config: {
+      async handler(request, h) {
+        const deployments = Array.from(accessedDeployments.values());
+        accessedDeployments.clear();
+        return { deployments };
+      },
+    },
+  });
+
+  // TODO(cjihrig): This route needs to be on a non-exposed port.
+  server.route({
+    method: 'DELETE',
+    path: '/deployments',
+    config: {
+      async handler(request, h) {
+        for (let i = 0; i < request.payload.deployments.length; ++i) {
+          const deployment = request.payload.deployments[i];
+
+          accessedDeployments.delete(deployment.deployment);
+          activeDeployments.delete(deployment.host);
+        }
+
+        return 'ok';
+      }
+    },
+  });
+
   server.route({
     method: '*',
     path: '/{path*}',
@@ -209,7 +227,16 @@ async function main() {
           deployment = config;
         }
 
-        deployment.generation = 0;
+        let accessedDeployment = accessedDeployments.get(deployment.deployment);
+        if (accessedDeployment === undefined) {
+          accessedDeployment = {
+            deployment: deployment.deployment,
+            host,
+          };
+          accessedDeployments.set(deployment.deployment, accessedDeployment);
+        }
+
+        // TODO(cjihrig): If the pod cannot be reached, delete the deployment and create a new one on the next request.
         return h.proxy({
           host: deployment.pod.status.podIP,
           port: kDataPort,
