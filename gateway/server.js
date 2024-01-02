@@ -37,6 +37,7 @@ function podWatchHandler(type, apiObj, watchObj) {
 }
 
 function podWatchExit(err) {
+  console.log('the pod watcher has exited');
   console.log(err);
 }
 
@@ -158,6 +159,7 @@ async function createFunctionPod(config) {
     const [result] = await once(k8sEvents, 'pod');
     return result;
   } catch (err) {
+    console.log('error creating function pod');
     console.error(err);
   }
 }
@@ -208,23 +210,21 @@ async function main() {
       },
       async handler(request, h) {
         const host = request.headers.host;
-        const config = await lookupHostConfig(host);
-
-        if (config === null) {
-          return h.response().code(404);
-        }
-
         let deployment = activeDeployments.get(host);
 
         if (deployment === undefined) {
+          deployment = await lookupHostConfig(host);
+
+          if (deployment === null) {
+            return h.response().code(404);
+          }
+
           const startTime = process.hrtime.bigint();
-          const pod = await createFunctionPod(config);
+          const pod = await createFunctionPod(deployment);
           const endTime = process.hrtime.bigint();
-          // console.log(pod);
           console.log(`pod ready in ${endTime - startTime} nanoseconds`);
-          config.pod = pod;
-          activeDeployments.set(host, config);
-          deployment = config;
+          deployment.pod = pod;
+          activeDeployments.set(host, deployment);
         }
 
         let accessedDeployment = accessedDeployments.get(deployment.deployment);
