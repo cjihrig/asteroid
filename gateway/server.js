@@ -1,5 +1,4 @@
 'use strict';
-const { EventEmitter, once } = require('node:events');
 const { GetObjectCommand, S3Client } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const hapi = require('@hapi/hapi');
@@ -8,15 +7,16 @@ const k8s = require('@kubernetes/client-node');
 const pg = require('pg');
 const kubeconfig = new k8s.KubeConfig();
 const kAppNamespace = 'apps';
-const kPodWatchPath = `/api/v1/namespaces/${kAppNamespace}/pods`;
-const kPodWatchOptions = { allowWatchBookmarks: true };
-const k8sEvents = new EventEmitter();
 const kControlPort = 7000;
 const kDataPort = 8000;
 
-// TODO(cjihrig): Move this tracking to database.
-const activeDeployments = new Map();
-const accessedDeployments = new Map();
+const pgClient = new pg.Client({
+  host: 'asteroid-postgres-service.default.svc.cluster.local',
+  port: 5432,
+  database: 'asteroid',
+  user: 'admin',
+  password: 'admin',
+});
 
 const s3 = new S3Client({
   credentials: {
@@ -28,33 +28,76 @@ const s3 = new S3Client({
   forcePathStyle: true,
 });
 
-function podWatchHandler(type, apiObj, watchObj) {
-  const status = watchObj?.object?.status;
-
-  if (status?.phase === 'Running' && status.containerStatuses?.[0]?.ready) {
-    k8sEvents.emit('pod', apiObj);
-  }
-}
-
-function podWatchExit(err) {
-  console.log('the pod watcher has exited');
-  console.log(err);
-}
-
 kubeconfig.loadFromDefault();
 
 const client = kubeconfig.makeApiClient(k8s.CoreV1Api);
-const watcher = new k8s.Watch(kubeconfig);
-const pgClient = new pg.Client({
-  host: 'asteroid-postgres-service.default.svc.cluster.local',
-  port: 5432,
-  database: 'asteroid',
-  user: 'admin',
-  password: 'admin',
+const informer = k8s.makeInformer(kubeconfig, `/api/v1/namespaces/${kAppNamespace}/pods`, () => {
+  return client.listNamespacedPod(kAppNamespace);
 });
 
-// watch() returns an object with an 'abort()' method.
-watcher.watch(kPodWatchPath, kPodWatchOptions, podWatchHandler, podWatchExit);
+function createDeferredPromise() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+
+  return {
+    promise,
+    resolve,
+    reject,
+  };
+}
+
+// TODO(cjihrig): Move this tracking to database.
+const activeDeployments = new Map();
+const accessedDeployments = new Map();
+const pendingDeployments = new Map();
+
+function untrackDeployment(deploymentId, host) {
+  accessedDeployments.delete(deploymentId);
+  activeDeployments.delete(host);
+}
+
+
+function podInformerHandler(pod) {
+  const deployment = pod?.metadata?.annotations?.['asteroid.deployment'];
+  if (typeof deployment !== 'string') {
+    return;
+  }
+
+  const deferred = pendingDeployments.get(deployment);
+  if (deferred === undefined) {
+    return;
+  }
+
+  const status = pod.status;
+
+  if (status?.phase === 'Running' && status.containerStatuses?.[0]?.ready) {
+    deferred.resolve(pod);
+  }
+}
+
+informer.on('add', podInformerHandler);
+informer.on('update', podInformerHandler);
+
+informer.on('delete', (pod) => {
+  const annotations = pod?.metadata?.annotations;
+  const deployment = annotations?.['asteroid.deployment'];
+
+  if (typeof deployment === 'string') {
+    untrackDeployment(deployment, 'asteroid.host');
+  }
+});
+
+informer.on('error', (err) => {
+  console.log('informer error');
+  console.log(err);
+  setImmediate(() => {
+    informer.start();
+  });
+});
 
 async function lookupHostConfig(host) {
   const sql = 'SELECT id, bucket_name, entry_file, handler FROM deployments WHERE host = $1';
@@ -87,12 +130,17 @@ async function lookupHostConfig(host) {
 }
 
 async function createFunctionPod(config) {
+  // TODO(cjihrig): Incorporate a timeout in this functionality.
   try {
     const podDefinition = {
       metadata: {
         // TODO(cjihrig): Need some random string in the name.
         name: config.deployment,
         namespace: kAppNamespace,
+        annotations: {
+          'asteroid.deployment': config.deployment,
+          'asteroid.host': config.host,
+        },
       },
       spec: {
         hostIPC: false,
@@ -154,13 +202,17 @@ async function createFunctionPod(config) {
         restartPolicy: 'Never',
       },
     };
+
+    const deferred = createDeferredPromise();
+    pendingDeployments.set(config.deployment, deferred);
     await client.createNamespacedPod(kAppNamespace, podDefinition);
-    // TODO(cjihrig): This is a bug. The event might be for a different pod.
-    const [result] = await once(k8sEvents, 'pod');
-    return result;
+    const pod = await deferred.promise;
+    return pod;
   } catch (err) {
     console.log('error creating function pod');
     console.error(err);
+  } finally {
+    pendingDeployments.delete(config.deployment);
   }
 }
 
@@ -172,6 +224,7 @@ async function main() {
   // TODO(cjihrig): This route needs to be on a non-exposed port.
   server.route({
     method: 'GET',
+    // TODO(cjihrig): This is not a great path name for this functionality.
     path: '/deployments',
     config: {
       async handler(request, h) {
@@ -191,8 +244,7 @@ async function main() {
         for (let i = 0; i < request.payload.deployments.length; ++i) {
           const deployment = request.payload.deployments[i];
 
-          accessedDeployments.delete(deployment.deployment);
-          activeDeployments.delete(deployment.host);
+          untrackDeployment(deployment.deployment, deployment.host);
         }
 
         return 'ok';
@@ -213,6 +265,10 @@ async function main() {
         let deployment = activeDeployments.get(host);
 
         if (deployment === undefined) {
+          // TODO(cjihrig): The database needs to let us know if there is
+          // already a deployment or not. If there was not already one, then
+          // this request launches the deployment. If a deployment already
+          // exists we need to determine if it is pending or not.
           deployment = await lookupHostConfig(host);
 
           if (deployment === null) {
@@ -236,7 +292,7 @@ async function main() {
           accessedDeployments.set(deployment.deployment, accessedDeployment);
         }
 
-        // TODO(cjihrig): If the pod cannot be reached, delete the deployment and create a new one on the next request.
+        // TODO(cjihrig): If the pod cannot be reached, untrack the deployment and create a new one.
         return h.proxy({
           host: deployment.pod.status.podIP,
           port: kDataPort,
@@ -247,6 +303,7 @@ async function main() {
   });
 
   await pgClient.connect();
+  informer.start();
   await server.start();
 }
 
