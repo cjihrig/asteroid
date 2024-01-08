@@ -1,14 +1,26 @@
 'use strict';
 const k8s = require('@kubernetes/client-node');
+const pg = require('pg');
 const kubeconfig = new k8s.KubeConfig();
 const kAsteroidNamespace = 'default';
 const kAppNamespace = 'apps';
+
+const pgClient = new pg.Client({
+  host: 'asteroid-postgres-service.default.svc.cluster.local',
+  port: 5432,
+  database: 'asteroid',
+  user: 'admin',
+  password: 'admin',
+});
 
 kubeconfig.loadFromDefault();
 
 const client = kubeconfig.makeApiClient(k8s.CoreV1Api);
 const activeDeployments = new Map();
 
+// TODO(cjihrig): Add another task that periodically deletes active deployments
+// whose k8s resource is null, but the created_at field is past a certain
+// threshold. This will delete deployments that have failed to launch.
 
 async function reaper() {
   try {
@@ -60,6 +72,23 @@ async function reaper() {
     promises = [];
 
     if (inactiveDeployments.length > 0) {
+      try {
+        // TODO(cjihrig): This may need to be batched if the number of
+        // deployments gets too large.
+        const ids = inactiveDeployments.map((deployment) => {
+          return `'${deployment.deployment}'`;
+        }).join(', ');
+        const sql = `DELETE FROM active_deployments WHERE id IN (${ids})`;
+        const result = await pgClient.query(sql);
+
+        if (result.rowCount !== inactiveDeployments.length) {
+          console.warn(`attempted to delete ${inactiveDeployments.length} inactive deployments but only deleted ${result.rowCount}`);
+        }
+      } catch (err) {
+        console.error('error deleting active deployments from database');
+        console.error(err);
+      }
+
       for (let i = 0; i < subsets?.length; ++i) {
         const subset = subsets[i];
 
@@ -74,16 +103,12 @@ async function reaper() {
         }
       }
 
-      console.dir(await Promise.allSettled(promises), { depth: 5 });
-
       for (let i = 0; i < inactiveDeployments.length; ++i) {
         const deployment = inactiveDeployments[i];
 
         activeDeployments.delete(deployment.deployment);
 
         try {
-          // TODO(cjihrig): Let the rest of the system know this is going away first.
-          // TODO(cjihrig): Until this is implemented, the system is broken.
           await client.deleteNamespacedPod(deployment.deployment, kAppNamespace);
         } catch (err) {
           console.log(`could not delete deployment '${deployment.deployment}': ${err}`);
@@ -97,4 +122,9 @@ async function reaper() {
   setTimeout(reaper, 10 * 1000);
 }
 
-reaper();
+async function main() {
+  await pgClient.connect();
+  reaper();
+}
+
+main();

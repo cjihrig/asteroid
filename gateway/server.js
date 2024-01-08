@@ -99,121 +99,174 @@ informer.on('error', (err) => {
   });
 });
 
-async function lookupHostConfig(host) {
-  const sql = 'SELECT id, bucket_name, entry_file, handler FROM deployments WHERE host = $1';
+async function updateDeploymentResource(deploymentId, resource) {
+  try {
+    const sql = 'UPDATE active_deployments SET k8s_resource = $1 WHERE id = $2';
+    const result = await pgClient.query(sql, [resource, deploymentId]);
+
+    if (result.rowCount !== 1) {
+      throw new Error(`no matching deployment '${deploymentId}' for resource '${resource}'`);
+    }
+  } catch (err) {
+    console.error('error updating deployment resource');
+    console.error(err);
+  }
+}
+
+async function getOrCreateActiveDeployment(host) {
+  const sql = `
+    INSERT INTO active_deployments (
+      id,
+      host,
+      bucket_name,
+      entry_file,
+      handler
+    ) SELECT
+      id,
+      host,
+      bucket_name,
+      entry_file,
+      handler
+    FROM deployments
+    WHERE host = $1
+    ON CONFLICT (id) DO UPDATE SET is_inited = TRUE
+    RETURNING *
+  `;
   const result = await pgClient.query(sql, [host]);
 
   if (result.rowCount !== 1) {
+    // The request was for an unknown host.
+    console.error(`request for unknown host: '${host}'`);
     return null;
   }
 
-  const {
-    id: deployment,
-    bucket_name: bucketName,
-    entry_file: entry,
-    handler,
-  } = result.rows[0];
-  const getCmd = new GetObjectCommand({
-    Bucket: bucketName,
-    Key: deployment,
-  });
-  const url = await getSignedUrl(s3, getCmd, { expiresIn: 60 * 3 });
-
-  return {
-    deployment,
-    entry,
-    handler,
+  const row = result.rows[0];
+  const deployment = {
+    deployment: row.id,
     host,
-    pod: null,
-    url,
+    bucket: row.bucket_name,
+    entry: row.entry_file,
+    handler: row.handler,
+    url: null,
+    resource: row.k8s_resource,
+    initialized: row.is_inited,
   };
+
+  if (deployment.resource) {
+    // The requested deployment is already running.
+    console.log(`host '${host}' already running at '${deployment.resource}'`);
+  } else {
+    try {
+      const deferred = createDeferredPromise();
+      pendingDeployments.set(deployment.deployment, deferred);
+
+      if (!deployment.initialized) {
+        // The requested deployment is not running or starting.
+        const getCmd = new GetObjectCommand({
+          Bucket: deployment.bucket,
+          Key: deployment.deployment,
+        });
+        const url = await getSignedUrl(s3, getCmd, { expiresIn: 60 * 3 });
+        deployment.url = url;
+        const startTime = process.hrtime.bigint();
+        const pod = await createFunctionPod(deployment, deferred.promise);
+        deployment.resource = pod.status.podIP;
+        setImmediate(updateDeploymentResource, deployment.deployment, deployment.resource);
+        const delay = process.hrtime.bigint() - startTime;
+        console.log(`host '${host}' started at '${deployment.resource}' after ${delay} nanoseconds`);
+      } else {
+        // The requested deployment is already starting but not yet running.
+
+        // TODO(cjihrig) - Use deferred.promise, a timeout, and a separate query.
+      }
+    } catch (err) {
+      console.log('error creating function pod');
+      console.error(err);
+      return null;
+    } finally {
+      pendingDeployments.delete(deployment.deployment);
+    }
+  }
+
+  activeDeployments.set(host, deployment);
+  return deployment;
 }
 
-async function createFunctionPod(config) {
+async function createFunctionPod(config, pendingPromise) {
   // TODO(cjihrig): Incorporate a timeout in this functionality.
-  try {
-    const podDefinition = {
-      metadata: {
-        // TODO(cjihrig): Need some random string in the name.
-        name: config.deployment,
-        namespace: kAppNamespace,
-        annotations: {
-          'asteroid.deployment': config.deployment,
-          'asteroid.host': config.host,
+  const podDefinition = {
+    metadata: {
+      // TODO(cjihrig): Need some random string in the name.
+      name: config.deployment,
+      namespace: kAppNamespace,
+      annotations: {
+        'asteroid.deployment': config.deployment,
+        'asteroid.host': config.host,
+      },
+    },
+    spec: {
+      hostIPC: false,
+      hostNetwork: false,
+      hostPID: false,
+      containers: [
+        {
+          name: 'asteroid-runner',
+          image: 'asteroid-runner',
+          imagePullPolicy: 'IfNotPresent',
+          env: [
+            {
+              name: 'ASTEROID_DEPLOYMENT_PACKAGE_URL',
+              value: config.url,
+            },
+            {
+              name: 'ASTEROID_DEPLOYMENT_PACKAGE_ENTRY',
+              value: config.entry,
+            },
+            {
+              name: 'ASTEROID_DEPLOYMENT_PACKAGE_EXPORT',
+              value: config.handler,
+            },
+          ],
+          securityContext: {
+            allowPrivilegeEscalation: false,
+            capabilities: {
+              drop: ['ALL'],
+              add: ['NET_BIND_SERVICE'],
+            },
+            privileged: false,
+            runAsNonRoot: true,
+            runAsUser: 1000,
+            seccompProfile: {
+              type: 'RuntimeDefault',
+            },
+          },
+          readinessProbe: {
+            httpGet: {
+              path: '/',
+              port: kControlPort,
+            },
+            periodSeconds: 1,
+          },
         },
-      },
-      spec: {
-        hostIPC: false,
-        hostNetwork: false,
-        hostPID: false,
-        containers: [
-          {
-            name: 'asteroid-runner',
-            image: 'asteroid-runner',
-            imagePullPolicy: 'IfNotPresent',
-            env: [
-              {
-                name: 'ASTEROID_DEPLOYMENT_PACKAGE_URL',
-                value: config.url,
-              },
-              {
-                name: 'ASTEROID_DEPLOYMENT_PACKAGE_ENTRY',
-                value: config.entry,
-              },
-              {
-                name: 'ASTEROID_DEPLOYMENT_PACKAGE_EXPORT',
-                value: config.handler,
-              },
-            ],
-            securityContext: {
-              allowPrivilegeEscalation: false,
-              capabilities: {
-                drop: ['ALL'],
-                add: ['NET_BIND_SERVICE'],
-              },
-              privileged: false,
-              runAsNonRoot: true,
-              runAsUser: 1000,
-              seccompProfile: {
-                type: 'RuntimeDefault',
-              },
-            },
-            readinessProbe: {
-              httpGet: {
-                path: '/',
-                port: kControlPort,
-              },
-              periodSeconds: 1,
-            },
-          },
-        ],
-        ports: [
-          {
-            name: 'http-control',
-            containerPort: kControlPort,
-            hostPort: kControlPort,
-          },
-          {
-            name: 'http-data',
-            containerPort: kDataPort,
-            hostPort: kDataPort,
-          },
-        ],
-        restartPolicy: 'Never',
-      },
-    };
+      ],
+      ports: [
+        {
+          name: 'http-control',
+          containerPort: kControlPort,
+          hostPort: kControlPort,
+        },
+        {
+          name: 'http-data',
+          containerPort: kDataPort,
+          hostPort: kDataPort,
+        },
+      ],
+      restartPolicy: 'Never',
+    },
+  };
 
-    const deferred = createDeferredPromise();
-    pendingDeployments.set(config.deployment, deferred);
-    await client.createNamespacedPod(kAppNamespace, podDefinition);
-    const pod = await deferred.promise;
-    return pod;
-  } catch (err) {
-    console.log('error creating function pod');
-    console.error(err);
-  } finally {
-    pendingDeployments.delete(config.deployment);
-  }
+  client.createNamespacedPod(kAppNamespace, podDefinition);
+  return await pendingPromise;
 }
 
 async function main() {
@@ -265,22 +318,11 @@ async function main() {
         let deployment = activeDeployments.get(host);
 
         if (deployment === undefined) {
-          // TODO(cjihrig): The database needs to let us know if there is
-          // already a deployment or not. If there was not already one, then
-          // this request launches the deployment. If a deployment already
-          // exists we need to determine if it is pending or not.
-          deployment = await lookupHostConfig(host);
+          deployment = await getOrCreateActiveDeployment(host);
 
           if (deployment === null) {
             return h.response().code(404);
           }
-
-          const startTime = process.hrtime.bigint();
-          const pod = await createFunctionPod(deployment);
-          const endTime = process.hrtime.bigint();
-          console.log(`pod ready in ${endTime - startTime} nanoseconds`);
-          deployment.pod = pod;
-          activeDeployments.set(host, deployment);
         }
 
         let accessedDeployment = accessedDeployments.get(deployment.deployment);
@@ -294,7 +336,7 @@ async function main() {
 
         // TODO(cjihrig): If the pod cannot be reached, untrack the deployment and create a new one.
         return h.proxy({
-          host: deployment.pod.status.podIP,
+          host: deployment.resource,
           port: kDataPort,
           protocol: 'http',
         });
