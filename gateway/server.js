@@ -178,6 +178,7 @@ async function getOrCreateActiveDeployment(host) {
         // The requested deployment is already starting but not yet running.
 
         // TODO(cjihrig) - Use deferred.promise, a timeout, and a separate query.
+        throw new Error('asteroid: unimplemented');
       }
     } catch (err) {
       console.log('error creating function pod');
