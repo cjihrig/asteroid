@@ -1,6 +1,9 @@
 # asteroid
 
-Deployer of Node.js
+Asteroid is a Kubernetes-based platform for deploying applications. The following features are supported:
+
+- Deploying Node.js servers from tarballs.
+- Applications scale to zero when they become inactive.
 
 ## Deploying to minikube
 
