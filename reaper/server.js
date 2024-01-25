@@ -89,20 +89,6 @@ async function reaper() {
         console.error(err);
       }
 
-      for (let i = 0; i < subsets?.length; ++i) {
-        const subset = subsets[i];
-
-        for (let j = 0; j < subset.addresses.length; ++j) {
-          promises.push(fetch(`http://${subset.addresses[j].ip}:8000/deployments`, {
-            method: 'DELETE',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ deployments: inactiveDeployments }),
-          }));
-        }
-      }
-
       for (let i = 0; i < inactiveDeployments.length; ++i) {
         const deployment = inactiveDeployments[i];
 

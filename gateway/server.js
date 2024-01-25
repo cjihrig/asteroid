@@ -50,7 +50,7 @@ function createDeferredPromise() {
   };
 }
 
-// TODO(cjihrig): Move this tracking to database.
+// TODO(cjihrig): Make these entries auto-expire after some amount of time.
 const activeDeployments = new Map();
 const accessedDeployments = new Map();
 const pendingDeployments = new Map();
@@ -346,6 +346,14 @@ async function main() {
   });
 
   await pgClient.connect();
+  pgClient.query('LISTEN asteroid_notifications');
+  pgClient.on('notification', (message) => {
+    console.log('NOTIFICATION');
+    console.log(message);
+    const msg = JSON.parse(message.payload);
+    console.log(msg.payload.id, msg.payload.host)
+    untrackDeployment(msg.payload.id, msg.payload.host);
+  });
   informer.start();
   await server.start();
 }
